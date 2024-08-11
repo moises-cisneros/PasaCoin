@@ -7,7 +7,7 @@ contract Pasanaku {
         uint montoARecibir;
         bool haRecibidoFondos;
         bool esSuTurno;
-        bool esBeneficiario; // Indica si el participante ya ha recibido fondos en alguna ronda
+        bool esBeneficiario;  // Nuevo campo para indicar si ya fue beneficiario
     }
 
     struct Sala {
@@ -17,16 +17,17 @@ contract Pasanaku {
         uint montoTotalARedibirPorRonda;
         uint numeroDeRondas;
         uint rondaActual;
-        string tipoDeReparticion; // "ruleta" o "enlistar"
+        string tipoDeReparticion;
         uint diasParaEnviarAporte;
         uint pozoTotal;
-        bool salaActiva; // Indica si la sala está activa o cerrada
+        bool salaActiva;
         Participante[] participantes;
     }
 
     mapping(bytes32 => Sala) public salas;
 
     event SalaCerrada(bytes32 indexed salaId, string mensaje);
+    event BeneficiarioSeleccionado(bytes32 indexed salaId, address beneficiario);
 
     // Crear una sala de Pasanaku
     function crearSala(
@@ -56,7 +57,6 @@ contract Pasanaku {
         nuevaSala.diasParaEnviarAporte = _diasParaEnviarAporte;
         nuevaSala.salaActiva = true;
 
-        // Añadir al anfitrión como primer participante
         Participante memory anfitrionParticipante;
         anfitrionParticipante.wallet = _anfitrion;
         anfitrionParticipante.montoARecibir = nuevaSala.montoTotalARedibirPorRonda;
@@ -76,7 +76,6 @@ contract Pasanaku {
         require(sala.participantes.length < sala.cantidadParticipantes, "La sala esta llena");
         require(sala.salaActiva, "La sala esta cerrada");
 
-        // Verifica si la dirección ya está en uso
         for (uint i = 0; i < sala.participantes.length; i++) {
             require(sala.participantes[i].wallet != participanteDireccion, "Este participante ya esta en la sala");
         }
@@ -99,7 +98,6 @@ contract Pasanaku {
         require(monto == sala.montoAportarPorRonda, "El monto aportado es incorrecto");
         require(sala.rondaActual <= sala.numeroDeRondas, "Todas las rondas han finalizado");
 
-        // Verifica si es participante
         bool esParticipante = false;
         for (uint i = 0; i < sala.participantes.length; i++) {
             if (sala.participantes[i].wallet == participanteDireccion) {
@@ -112,44 +110,53 @@ contract Pasanaku {
         sala.pozoTotal += monto;
     }
 
-    // Realizar sorteo para tipo de repartición "ruleta"
-    function realizarSorteoRuleta(bytes32 salaId) public {
+    // Realizar sorteo para seleccionar al beneficiario (solo anfitrion)
+    function realizarSorteo(bytes32 salaId, address anfitrionDireccion) public {
         Sala storage sala = salas[salaId];
-        require(sala.salaActiva, "La sala esta cerrada");
+        require(sala.anfitrion == anfitrionDireccion, "Solo el anfitrion puede realizar el sorteo");
         require(sala.pozoTotal >= sala.montoTotalARedibirPorRonda, "No se ha alcanzado el monto total");
-        require(keccak256(abi.encodePacked(sala.tipoDeReparticion)) == keccak256(abi.encodePacked("ruleta")), "Tipo de reparticion no es ruleta");
 
-        // Lista de participantes que aún no han sido beneficiarios
-        address[] memory posiblesBeneficiarios = new address[](sala.participantes.length);
-        uint contador = 0;
+        uint indiceAleatorio;
+        address beneficiario;
 
+        do {
+            indiceAleatorio = uint(keccak256(abi.encodePacked(block.timestamp, block.difficulty))) % sala.participantes.length;
+            beneficiario = sala.participantes[indiceAleatorio].wallet;
+        } while (sala.participantes[indiceAleatorio].esBeneficiario);
+
+        sala.participantes[indiceAleatorio].esBeneficiario = true;
+        sala.participantes[indiceAleatorio].esSuTurno = true;
+
+        emit BeneficiarioSeleccionado(salaId, beneficiario);
+    }
+
+    // Enviar el monto total al beneficiario
+    function enviarMontoTotal(bytes32 salaId) public {
+        Sala storage sala = salas[salaId];
+        require(sala.pozoTotal >= sala.montoTotalARedibirPorRonda, "No se ha alcanzado el monto total");
+
+        address payable destinatario;
         for (uint i = 0; i < sala.participantes.length; i++) {
-            if (!sala.participantes[i].esBeneficiario) {
-                posiblesBeneficiarios[contador] = sala.participantes[i].wallet;
-                contador++;
-            }
-        }
-
-        require(contador > 0, "No hay participantes disponibles para el sorteo");
-
-        uint indiceAleatorio = uint(keccak256(abi.encodePacked(block.timestamp, block.difficulty))) % contador;
-        address ganador = posiblesBeneficiarios[indiceAleatorio];
-
-        // Marcar al ganador como beneficiario
-        for (uint i = 0; i < sala.participantes.length; i++) {
-            if (sala.participantes[i].wallet == ganador) {
-                sala.participantes[i].esBeneficiario = true;
+            if (sala.participantes[i].esSuTurno && !sala.participantes[i].haRecibidoFondos) {
+                destinatario = payable(sala.participantes[i].wallet);
                 sala.participantes[i].haRecibidoFondos = true;
                 sala.participantes[i].esSuTurno = false;
                 break;
             }
         }
 
-        payable(ganador).transfer(sala.pozoTotal);
+        destinatario.transfer(sala.pozoTotal);
         sala.pozoTotal = 0;
 
-        // Avanza a la siguiente ronda o cierra la sala si es la última ronda
-        if (sala.rondaActual == sala.numeroDeRondas) {
+        bool todosBeneficiarios = true;
+        for (uint i = 0; i < sala.participantes.length; i++) {
+            if (!sala.participantes[i].esBeneficiario) {
+                todosBeneficiarios = false;
+                break;
+            }
+        }
+
+        if (todosBeneficiarios || sala.rondaActual == sala.numeroDeRondas) {
             sala.salaActiva = false;
             emit SalaCerrada(salaId, "El juego ha terminado. La sala ha sido cerrada.");
         } else {
